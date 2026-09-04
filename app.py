@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from   engine_v12_fixed import prepare, train_model, predict_latest, backtest, monte_carlo
+from  engine_v12_fast import prepare, train_model, predict_latest, backtest, monte_carlo
 
 st.set_page_config(page_title="AI Gold Analyzer V12", page_icon="📈", layout="wide")
 st.title("📈 AI GOLD ANALYZER V12")
