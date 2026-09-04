@@ -1,73 +1,141 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from  engine_v12_fast import prepare, train_model, predict_latest, backtest, monte_carlo
+import yfinance as yf
 
-st.set_page_config(page_title="AI Gold Analyzer V12", page_icon="📈", layout="wide")
+from engine_v12_fast import prepare, train_model, predict_latest, backtest
+
+st.set_page_config(page_title="AI Gold Analyzer V12", layout="wide")
+
 st.title("📈 AI GOLD ANALYZER V12")
-st.caption("XAUUSD research / paper-trading dashboard — no real orders")
+st.caption("XAUUSD real market data / research & paper-trading dashboard — no real orders")
 
-uploaded = st.file_uploader("ارفع بيانات XAUUSD بصيغة CSV", type="csv")
+c1, c2, c3 = st.columns(3)
 
-if uploaded:
-    df = pd.read_csv(uploaded)
-    df.columns = [x.lower().strip() for x in df.columns]
-else:
-    # Synthetic data so the project opens without a data source.
-    rng = np.random.default_rng(42)
-    n = 6000
-    ret = rng.normal(0, 0.0012, n)
-    close = 2400*np.exp(np.cumsum(ret))
-    high = close*(1+rng.uniform(0,.0018,n))
-    low = close*(1-rng.uniform(0,.0018,n))
-    open_ = np.r_[close[0], close[:-1]]
-    df = pd.DataFrame({
-        "time": pd.date_range("2025-01-01", periods=n, freq="5min"),
-        "open": open_, "high": high, "low": low, "close": close,
-        "volume": rng.integers(100, 10000, n)
-    })
-    st.info("يتم استخدام بيانات تجريبية. ارفع CSV للحصول على اختبار حقيقي.")
+with c1:
+    interval = st.selectbox("الفريم", ["5m", "15m", "1h"], index=0)
 
-df = df.dropna(subset=["open","high","low","close"]).copy()
-df = prepare(df)
+with c2:
+    period = st.selectbox("الفترة", ["5d", "1mo", "3mo"], index=0)
 
-feature_cols = [c for c in df.columns if c.startswith("f_")]
-model, calibration, test = train_model(df, feature_cols)
+with c3:
+    refresh = st.button("🔄 تحديث بيانات الذهب")
 
-latest = predict_latest(model, calibration, df, feature_cols)
-stats, trades = backtest(df, model, calibration, feature_cols)
-mc = monte_carlo(trades["r"].values if len(trades) else np.array([]))
 
-c = st.columns(6)
-c[0].metric("Signal", latest["signal"])
-c[1].metric("Confidence", f'{latest["confidence"]:.1f}%')
-c[2].metric("Win Rate", f'{stats["win_rate"]:.1f}%')
-c[3].metric("Trades", stats["trades"])
-c[4].metric("Profit Factor", f'{stats["profit_factor"]:.2f}')
-c[5].metric("Max DD", f'{stats["max_dd"]:.2f} R')
+@st.cache_data(ttl=60, show_spinner=False)
+def load_gold(interval_value, period_value):
+    df = yf.download(
+        "XAUUSD=X",
+        period=period_value,
+        interval=interval_value,
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+        timeout=15,
+        multi_level_index=False,
+    )
 
-st.subheader("🎯 آخر إشارة")
-a,b,c = st.columns(3)
-a.metric("Entry", f'{latest["entry"]:.2f}')
-b.metric("Stop Loss", f'{latest["sl"]:.2f}')
-c.metric("Take Profit", f'{latest["tp"]:.2f}')
+    if df is None or df.empty:
+        raise ValueError("لم تصل بيانات XAUUSD من مزود البيانات.")
 
-st.write("**Market state:**", latest["state"])
-st.write("**Model score:**", f'{latest["score"]:.3f}')
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [
+            c[0] if isinstance(c, tuple) else c
+            for c in df.columns
+        ]
 
-st.subheader("📊 السعر والمؤشرات")
-st.line_chart(df.tail(500)[["close","ema20","ema50","ema200"]])
+    df.columns = [str(c).strip().lower() for c in df.columns]
 
-st.subheader("🧪 Out-of-sample test")
-st.write({
-    "test_rows": len(test),
-    "calibration_samples": len(calibration),
-    "Monte Carlo median final R": round(mc.get("median_final_r",0),2),
-    "Monte Carlo 5% final R": round(mc.get("p05_final_r",0),2),
-    "Monte Carlo 95% final R": round(mc.get("p95_final_r",0),2),
-})
+    needed = ["open", "high", "low", "close"]
+    missing = [c for c in needed if c not in df.columns]
 
-st.subheader("آخر الصفقات")
-st.dataframe(trades.tail(50), use_container_width=True)
+    if missing:
+        raise ValueError("بيانات ناقصة: " + ", ".join(missing))
 
-st.warning("هذه أداة بحث وتعليم وليست توصية مالية. لا تستخدم النتائج أو Confidence كضمان للربح.")
+    df = df[needed].copy()
+    df = df.dropna()
+    df["time"] = df.index
+
+    return df
+
+
+if refresh:
+    load_gold.clear()
+
+try:
+    df = load_gold(interval, period)
+
+    st.success(
+        f"تم جلب {len(df):,} شمعة حقيقية لـ XAUUSD من Yahoo Finance."
+    )
+    st.caption(f"آخر شمعة: {df['time'].iloc[-1]}")
+
+    prepared = prepare(df)
+
+    features = [
+        "f_trend",
+        "f_ema_spread",
+        "f_rsi",
+        "f_adx",
+        "f_bos",
+        "f_choch",
+        "f_fvg",
+        "f_sweep",
+        "f_ob",
+        "f_sr",
+    ]
+
+    model, calibration, test = train_model(
+        prepared, features
+    )
+
+    pred = predict_latest(
+        model,
+        calibration,
+        prepared,
+        features
+    )
+
+    stats, trades = backtest(
+        prepared,
+        model,
+        calibration,
+        features
+    )
+
+    st.subheader("الإشارة الحالية")
+
+    m1, m2, m3, m4 = st.columns(4)
+
+    m1.metric("Signal", pred["signal"])
+    m2.metric("Confidence", f'{pred["confidence"]:.1f}%')
+    m3.metric("Entry", f'{pred["entry"]:.2f}')
+    m4.metric("Trend", pred["state"])
+
+    p1, p2, p3 = st.columns(3)
+
+    p1.metric("Stop Loss", f'{pred["sl"]:.2f}')
+    p2.metric("Take Profit", f'{pred["tp"]:.2f}')
+    p3.metric("Model Score", f'{pred["score"] * 100:.1f}%')
+
+    st.subheader("اختبار تاريخي على نفس البيانات")
+
+    b1, b2, b3, b4 = st.columns(4)
+
+    b1.metric("Win Rate", f'{stats["win_rate"]:.1f}%')
+    b2.metric("Trades", str(stats["trades"]))
+    b3.metric("Profit Factor", f'{stats["profit_factor"]:.2f}')
+    b4.metric("Max Drawdown (R)", f'{stats["max_dd"]:.2f}')
+
+    st.subheader("آخر الشموع")
+    st.dataframe(df.tail(20), use_container_width=True)
+
+    st.warning(
+        "تنبيه: هذه أداة بحث وتجربة فقط. بيانات Yahoo قد تكون متأخرة أو تختلف عن وسيطك، "
+        "والإشارة ليست ضماناً للربح. لا تستخدمها لأوامر حقيقية دون مصدر بيانات وتنفيذ موثوقين."
+    )
+
+except Exception as e:
+    st.error("تعذر تحميل/تحليل بيانات الذهب.")
+    st.code(str(e))
+    st.info("إذا رجع خطأ، أرسل لي صورة الخطأ فقط وأنا أصلحه لك.")
